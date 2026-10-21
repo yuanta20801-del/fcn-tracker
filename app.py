@@ -10,8 +10,8 @@ st.set_page_config(
     page_title="客戶多部位 FCN 每日監控控制台", layout="wide"
 )
 
-# ================= 1. 多客戶與多商品資料庫設定 =================
-POSITIONS_DATA = [
+# 預設內建部位資料 (備援機制)
+DEFAULT_POSITIONS = [
     {
         "id": "POS001",
         "client_name": "陳大通",
@@ -70,39 +70,60 @@ POSITIONS_DATA = [
             },
         },
     },
-    {
-        "id": "POS003",
-        "client_name": "張豪傑",
-        "code": "SNGSELN01866",
-        "product_name": "高盛 12M 美元固定配息 FCN (NVDA/TSM)",
-        "amount": 200000,
-        "trade_date": "2026-10-14",
-        "autocall_start_date": "2026-11-23",
-        "final_evaluation_date": "2027-10-21",
-        "coupon_rate_annual": 0.10008,
-        "stocks": {
-            "NVDA": {
-                "ticker": "NVDA",
-                "name": "輝達 (NVIDIA)",
-                "initial": 221.3000,
-                "autocall": 232.3650,
-                "strike": 173.1230,
-                "ki": 143.8450,
-            },
-            "TSM": {
-                "ticker": "TSM",
-                "name": "台積電 ADR (TSM)",
-                "initial": 430.0000,
-                "autocall": 451.5000,
-                "strike": 336.3890,
-                "ki": 279.5000,
-            },
-        },
-    },
 ]
 
 
-# ================= 2. API 資料抓取與快取函數 =================
+@st.cache_data(ttl=60)
+def load_positions_from_gsheet(csv_url):
+  """動態讀取 Google Sheets CSV 試算表"""
+  try:
+    df = pd.read_csv(csv_url)
+    positions = []
+    for idx, row in df.iterrows():
+      pos = {
+          "id": f"POS_{idx+1:03d}",
+          "client_name": str(row.get("客戶名稱", "未知客戶")).strip(),
+          "code": str(row.get("商品代號", "FCN")).strip(),
+          "product_name": str(row.get("商品名稱", "FCN 結構型商品")).strip(),
+          "amount": float(row.get("申購金額USD", 100000)),
+          "coupon_rate_annual": float(row.get("年化配息率", 0.1)),
+          "trade_date": str(row.get("交易日", "2026-10-14")).strip(),
+          "autocall_start_date": str(
+              row.get("提前買回起始日", "2026-11-23")
+          ).strip(),
+          "final_evaluation_date": str(
+              row.get("最後評價日", "2027-10-21")
+          ).strip(),
+          "stocks": {},
+      }
+      # 處理標的 1
+      if pd.notna(row.get("標的1代碼")):
+        s1_ticker = str(row["標的1代碼"]).strip()
+        pos["stocks"][s1_ticker] = {
+            "ticker": s1_ticker,
+            "name": str(row.get("標的1名稱", s1_ticker)).strip(),
+            "initial": float(row.get("標的1期初價", 100)),
+            "autocall": float(row.get("標的1KO價", 105)),
+            "strike": float(row.get("標的1履約價", 78.23)),
+            "ki": float(row.get("標的1KI價", 65)),
+        }
+      # 處理標的 2
+      if pd.notna(row.get("標的2代碼")):
+        s2_ticker = str(row["標的2代碼"]).strip()
+        pos["stocks"][s2_ticker] = {
+            "ticker": s2_ticker,
+            "name": str(row.get("標的2名稱", s2_ticker)).strip(),
+            "initial": float(row.get("標的2期初價", 100)),
+            "autocall": float(row.get("標的2KO價", 105)),
+            "strike": float(row.get("標的2履約價", 78.23)),
+            "ki": float(row.get("標的2KI價", 65)),
+        }
+      positions.append(pos)
+    return positions if positions else DEFAULT_POSITIONS
+  except Exception:
+    return DEFAULT_POSITIONS
+
+
 @st.cache_data(ttl=1800)
 def get_stock_data_cached(ticker_symbol, start_date="2026-09-01"):
   try:
@@ -150,32 +171,40 @@ def get_stock_news(query):
     return []
 
 
-# ================= 3. 頁面標題與側邊欄控制區 =================
+# ================= 介面佈局與側邊欄設定 =================
 st.title("💼 客戶 FCN 結構型商品部位多維度控制台")
-st.caption("即時追蹤名下所有客戶部位健康度、安全距離、每月配息與走勢圖表")
+st.caption("線上 Google Sheets 即時同步 | 全部位動態監控與警示系統")
 
-st.sidebar.header("🔍 部位篩選器")
+st.sidebar.header("⚙️ 資料源與部位篩選")
 
-# 1. 客戶篩選
+# Google Sheet 預設發布 URL
+default_sheet_url = "https://docs.google.com/spreadsheets/d/1cKGR9R1dUfFXOg5vF8igHNr3eYGbF12xrNGeIY-Qzpo/export?format=csv"
+gsheet_url = st.sidebar.text_input(
+    "Google Sheets CSV 串接網址：", value=default_sheet_url
+)
+
+# 載入資料
+positions_data = load_positions_from_gsheet(gsheet_url)
+
+# 客戶篩選
 clients = ["全部客戶"] + sorted(
-    list(set(p["client_name"] for p in POSITIONS_DATA))
+    list(set(p["client_name"] for p in positions_data))
 )
 selected_client = st.sidebar.selectbox("選擇客戶：", clients)
 
-# 2. 狀態過濾
+# 狀態過濾
 status_filter = st.sidebar.selectbox(
     "部位狀態篩選：",
     ["全部狀態", "🟢 正常運作中", "🟡 低於履約價", "🔴 已跌破 KI"],
 )
 
-# 篩選部位邏輯
-filtered_positions = POSITIONS_DATA
+# 篩選邏輯
+filtered_positions = positions_data
 if selected_client != "全部客戶":
   filtered_positions = [
       p for p in filtered_positions if p["client_name"] == selected_client
   ]
 
-# 計算所有部位當前狀態
 evaluated_positions = []
 total_aum = 0
 total_monthly_coupon = 0
@@ -187,7 +216,6 @@ for pos in filtered_positions:
   worst_dist_ki = 999.0
   pos_status = "🟢 正常運作中"
 
-  # 計算部位內股票狀態
   for sym, info in pos["stocks"].items():
     cur_p, _ = get_stock_data_cached(info["ticker"], pos["trade_date"])
     if cur_p > 0:
@@ -214,10 +242,9 @@ for pos in filtered_positions:
   total_monthly_coupon += monthly_coupon
   status_counts[pos_status] = status_counts.get(pos_status, 0) + 1
 
-
-# ================= 4. 頂層 KPI 彙總卡片 =================
+# 頂層 KPI 卡片
 kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-kpi_col1.metric("當前篩選受託總額", f"${total_aum:,.0f} USD")
+kpi_col1.metric("當前受託總額", f"${total_aum:,.0f} USD")
 kpi_col2.metric("預計每月派息總額", f"${total_monthly_coupon:,.2f} USD")
 kpi_col3.metric("🟢 正常部位數", f"{status_counts.get('🟢 正常運作中', 0)} 檔")
 kpi_col4.metric(
@@ -227,9 +254,8 @@ kpi_col4.metric(
 
 st.markdown("---")
 
-# ================= 5. 全部位清單總覽表格 =================
-st.subheader("📋 客戶部位總覽表")
-
+# 部位總覽表格
+st.subheader("📋 客戶部位總覽表 (同步自 Google Sheets)")
 if evaluated_positions:
   table_rows = []
   for item in evaluated_positions:
@@ -255,13 +281,12 @@ if evaluated_positions:
     })
   st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
 else:
-  st.info("尚無符合篩選條件的部位資料。")
+  st.info("尚無符合條件之部位資料。")
 
 st.markdown("---")
 
-# ================= 6. 單一部位深度圖表與新聞區 =================
+# 單一部位走勢圖與新聞
 st.subheader("🔍 單一部位走勢圖與最新動態明細")
-
 pos_options = {
     f"{item['raw']['client_name']} - {item['raw']['product_name']} (金額: ${item['raw']['amount']:,.0f})": item[
         "raw"
@@ -301,9 +326,7 @@ if pos_options:
     )
     col_m3.metric("距 KI 下限 (65%)", f"${info['ki']:.2f}", f"{dist_to_ki:+.2f}%")
 
-    # 繪製機構級走勢圖
     fig = go.Figure()
-
     fig.add_trace(
         go.Scatter(
             x=df_hist.index,
